@@ -20,8 +20,8 @@ def create_foot_dict(client, robot_id) -> dict:
     for i in range(client.getNumJoints(robot_id)):
         joint_info = client.getJointInfo(robot_id, i)
         joint_name = joint_info[12].decode(encoding='utf-8')
-        if "foot" in joint_name:
+        if "wrist" in joint_name:
             joint_name = joint_name.rsplit('_')
-            joint_name = f'{joint_name[0][0]}{joint_name[1][0]}_{joint_name[2]}'
+            joint_name = f'{joint_name[0][0]}{joint_name[1][0]}_foot'
             foot_dict[joint_name] = i
     return foot_dict

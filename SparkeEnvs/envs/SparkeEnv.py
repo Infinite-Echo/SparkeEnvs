@@ -9,9 +9,9 @@ import time
 
 NUM_SUBSTEPS = 5
 
-GENERAL_Z_HEIGHT = None
-MIN_Z_HEIGHT = None
-YAW_DRIFT_TOLERANCE = None
+GENERAL_Z_HEIGHT = 0.17818074236278436
+MIN_Z_HEIGHT = 0.1
+YAW_DRIFT_TOLERANCE = np.pi/36
 
 class SparkeEnv(gym.Env):
     metadata = {'render_modes': ['human', 'rgb_array'], 'video.frames_per_second': 60}
@@ -21,7 +21,7 @@ class SparkeEnv(gym.Env):
                  action_repeat=1,
                  use_sub_steps=True,
                  time_step=0.01,
-                 max_episode_steps=250,):
+                 max_episode_steps=1000,):
         super().__init__()
 
         self.render_mode = render_mode
@@ -35,13 +35,18 @@ class SparkeEnv(gym.Env):
             self._num_bullet_solver_iterations /= NUM_SUBSTEPS
             self._action_repeat *= NUM_SUBSTEPS
 
-        self.action_space = spaces.Box(-np.pi/2, np.pi/2, (12,), np.float32)
+        self.action_space = spaces.Box(
+            low=self._get_motor_bounds(high_bound=False),
+            high=self._get_motor_bounds(high_bound=True),
+            shape=(12,),
+            dtype=np.float64
+            )
         
         self.observation_space = spaces.Box(
             low=self._get_obs_low_bound(),
             high=self._get_obs_high_bound(),
             shape=(40,),
-            dtype=np.float32
+            dtype=np.float64
             )
         
         if self.render_mode:
@@ -133,8 +138,28 @@ class SparkeEnv(gym.Env):
     def _get_reward(self, observation):
         reward = 0.0
         # increase reward as current vel gets closer to target vel
+        
+        current_vel = observation[19:25]
+        for i in range(6):
+            diff = abs(self._goal_vel[i] - current_vel[i])
 
-        # punish and terminate if vel is under a threshold for x amount of steps
+            if round(diff, 2) <= round(self._best_vel_diffs[i],2):
+                reward += 50.0 * (self._best_vel_diffs[i] - diff)
+                self._best_vel_diffs[i] = diff
+            else:
+                reward += 50.0 * (self._best_vel_diffs[i] - diff)
+            
+            if round(diff, 2) <= 0.01:
+                reward += 100.0
+
+        if not ((GENERAL_Z_HEIGHT - 0.02) < observation[14] < (GENERAL_Z_HEIGHT + 0.02)):
+            reward -= 1.0
+
+        base_orientation = self._pybullet_client.getEulerFromQuaternion(observation[15:19])
+        yaw = base_orientation[2]
+        # if not (-YAW_DRIFT_TOLERANCE < yaw < YAW_DRIFT_TOLERANCE):
+        #     self._terminated = True
+        #     return -100.0
 
         # punish and terminate if base Z goes below minimum
         if observation[14] <= MIN_Z_HEIGHT:
@@ -144,10 +169,11 @@ class SparkeEnv(gym.Env):
         return reward
 
     def _set_new_goal(self):
-        self._goal_vel = np.zeros((6,), dtype=np.float32)
+        self._goal_vel = np.zeros((6,), dtype=np.float64)
         self._goal_vel[0] = self.np_random.uniform(0.05, 0.25)
         self._goal_z = GENERAL_Z_HEIGHT # figure out standing height
-        self._goal_orientation = np.array([0, 0, 0, 1], dtype=np.float32)
+        self._goal_orientation = np.array([0, 0, 0, 1], dtype=np.float64)
+        self._best_vel_diffs = np.zeros((6,), dtype=np.float64)
 
     def _calc_goal_distance(self, current_pos, goal_pos):
         return np.linalg.norm(current_pos[0:2] - goal_pos[0:2])
@@ -167,14 +193,14 @@ class SparkeEnv(gym.Env):
         Feet Contact	                4
 
         '''
-        high_bound = np.full((12,), np.pi/2, dtype=np.float32)
-        high_bound = np.append(high_bound, np.full((3,), np.inf, dtype=np.float32))
-        high_bound = np.append(high_bound, np.full((4,), 1.0, dtype=np.float32))
-        high_bound = np.append(high_bound, np.full((6,), np.inf, dtype=np.float32))
-        high_bound = np.append(high_bound, np.full((1,), np.inf, dtype=np.float32))
-        high_bound = np.append(high_bound, np.full((4,), 1.0, dtype=np.float32))
-        high_bound = np.append(high_bound, np.full((6,), 0.25, dtype=np.float32))
-        high_bound = np.append(high_bound, np.full((4,), 1.0, dtype=np.float32))
+        high_bound = self._get_motor_bounds(high_bound=True)
+        high_bound = np.append(high_bound, np.full((3,), np.inf, dtype=np.float64))
+        high_bound = np.append(high_bound, np.full((4,), 1.0, dtype=np.float64))
+        high_bound = np.append(high_bound, np.full((6,), np.inf, dtype=np.float64))
+        high_bound = np.append(high_bound, np.full((1,), np.inf, dtype=np.float64))
+        high_bound = np.append(high_bound, np.full((4,), 1.0, dtype=np.float64))
+        high_bound = np.append(high_bound, np.full((6,), 0.25, dtype=np.float64))
+        high_bound = np.append(high_bound, np.full((4,), 1.0, dtype=np.float64))
         return high_bound
     
     def _get_obs_low_bound(self):
@@ -192,12 +218,27 @@ class SparkeEnv(gym.Env):
         Feet Contact	                4
 
         '''
-        low_bound = np.full((12,), -np.pi/2, dtype=np.float32)
-        low_bound = np.append(low_bound, np.full((3,), -np.inf, dtype=np.float32))
-        low_bound = np.append(low_bound, np.full((4,), -1.0, dtype=np.float32))
-        low_bound = np.append(low_bound, np.full((6,), -np.inf, dtype=np.float32))
-        low_bound = np.append(low_bound, np.full((1,), -np.inf, dtype=np.float32))
-        low_bound = np.append(low_bound, np.full((4,), -1.0, dtype=np.float32))
-        low_bound = np.append(low_bound, np.full((6,), -0.25, dtype=np.float32))
-        low_bound = np.append(low_bound, np.full((4,), 0.0, dtype=np.float32))
+        low_bound = self._get_motor_bounds(high_bound=False)
+        low_bound = np.append(low_bound, np.full((3,), -np.inf, dtype=np.float64))
+        low_bound = np.append(low_bound, np.full((4,), -1.0, dtype=np.float64))
+        low_bound = np.append(low_bound, np.full((6,), -np.inf, dtype=np.float64))
+        low_bound = np.append(low_bound, np.full((1,), -np.inf, dtype=np.float64))
+        low_bound = np.append(low_bound, np.full((4,), -1.0, dtype=np.float64))
+        low_bound = np.append(low_bound, np.full((6,), -0.25, dtype=np.float64))
+        low_bound = np.append(low_bound, np.full((4,), 0.0, dtype=np.float64))
         return low_bound
+
+    def _get_motor_bounds(self, high_bound: bool = False) -> np.ndarray:
+        robot_id = self.robot.robot
+
+        if high_bound:
+            bound_index = 9
+        else:
+            bound_index = 8
+        
+        motor_bounds = np.ndarray((12,), dtype=np.float64)
+        for i in range(self._pybullet_client.getNumJoints(robot_id)):
+            joint_info = self._pybullet_client.getJointInfo(robot_id, i)
+            motor_bounds[i] = joint_info[bound_index]
+        
+        return motor_bounds
