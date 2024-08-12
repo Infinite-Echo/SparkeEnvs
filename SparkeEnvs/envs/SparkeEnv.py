@@ -34,6 +34,17 @@ class SparkeEnv(gym.Env):
             self._time_step /= NUM_SUBSTEPS
             self._num_bullet_solver_iterations /= NUM_SUBSTEPS
             self._action_repeat *= NUM_SUBSTEPS
+        
+        if self.render_mode:
+            self._pybullet_client = bc.BulletClient(connection_mode=p.GUI, options="--opengl2")
+        else:
+            self._pybullet_client = bc.BulletClient()
+
+        self._prev_reward = None
+        
+        # First Time Setup Must be Hard Reset
+        self._hard_reset = True
+        self.reset()
 
         self.action_space = spaces.Box(
             low=self._get_motor_bounds(high_bound=False),
@@ -48,17 +59,6 @@ class SparkeEnv(gym.Env):
             shape=(40,),
             dtype=np.float64
             )
-        
-        if self.render_mode:
-            self._pybullet_client = bc.BulletClient(connection_mode=p.GUI, options="--opengl2")
-        else:
-            self._pybullet_client = bc.BulletClient()
-
-        self._prev_reward = None
-        
-        # First Time Setup Must be Hard Reset
-        self._hard_reset = True
-        self.reset()
 
         self._hard_reset = hard_reset
         
@@ -229,7 +229,7 @@ class SparkeEnv(gym.Env):
         return low_bound
 
     def _get_motor_bounds(self, high_bound: bool = False) -> np.ndarray:
-        robot_id = self.robot
+        robot_id = self.robot.robot
 
         if high_bound:
             bound_index = 9
