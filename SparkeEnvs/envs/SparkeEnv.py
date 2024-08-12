@@ -229,7 +229,7 @@ class SparkeEnv(gym.Env):
         return low_bound
 
     def _get_motor_bounds(self, high_bound: bool = False) -> np.ndarray:
-        robot_id = self.robot.robot
+        robot_id = self.robot
 
         if high_bound:
             bound_index = 9
