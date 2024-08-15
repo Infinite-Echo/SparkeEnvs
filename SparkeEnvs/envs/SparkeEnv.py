@@ -6,11 +6,34 @@ from pybullet_utils import bullet_client as bc
 import pybullet_data
 from . import Sparke
 import time
+from ..utils import reward_utils
 
 NUM_SUBSTEPS = 5
 
+'''Possible observations:
+Observation	                    40
+----------------------------------
+Last Sent Motor Positions	    12
+Approximate Base Position	    3
+Approximate Base Orientation	4
+Approximate Base Velocity	    6
+Target Base Z	                1
+Target Base Orientation	        4
+Target Base Velocity	        6
+Feet Contact	                4'''
+
+OBS_X_VEL = 12 + 3 + 4
+OBS_Y_VEL = 12 + 3 + 4 + 1
+OBS_YAW_VEL = 12 + 3 + 4 + 5
+OBS_BASE_POS = 12
+OBS_BASE_ORIENTATION = 12 + 3
+OBS_TARGET_Z = 12 + 3 + 4 + 6
+OBS_TARGET_X_VEL = 12 + 3 + 4 + 6 + 1 + 4
+OBS_TARGET_Y_VEL = 12 + 3 + 4 + 6 + 1 + 4 + 1
+
 GENERAL_Z_HEIGHT = 0.17818074236278436
 MIN_Z_HEIGHT = 0.1
+MAX_Z_HEIGHT = 0.25
 YAW_DRIFT_TOLERANCE = np.pi/36
 
 class SparkeEnv(gym.Env):
@@ -20,8 +43,14 @@ class SparkeEnv(gym.Env):
                  hard_reset=True,
                  action_repeat=1,
                  use_sub_steps=True,
-                 time_step=0.01,
-                 max_episode_steps=1000,):
+                 time_step=0.004166667,
+                 max_episode_steps=250,
+                 x_vel_weight=1.0,
+                 yaw_vel_weight=1.0,
+                 drift_weight=2.0,
+                 base_orientation_weight=0.1,
+                 height_weight=0.01,
+                 ):
         super().__init__()
 
         self.render_mode = render_mode
@@ -30,6 +59,12 @@ class SparkeEnv(gym.Env):
         self._max_episode_steps = max_episode_steps
         self._num_bullet_solver_iterations = 300
         self._last_frame_time = 0.0
+        self._x_vel_weight = x_vel_weight
+        self._yaw_vel_weight = yaw_vel_weight
+        self._drift_weight = drift_weight
+        self._base_orientation_weight = base_orientation_weight
+        self._height_weight = height_weight
+
         if use_sub_steps:
             self._time_step /= NUM_SUBSTEPS
             self._num_bullet_solver_iterations /= NUM_SUBSTEPS
@@ -67,8 +102,6 @@ class SparkeEnv(gym.Env):
         
         if self._hard_reset:
             self._pybullet_client.resetSimulation()
-            # set time step
-            # set gravity, etc
             self._pybullet_client.setPhysicsEngineParameter(
                 numSolverIterations=int(self._num_bullet_solver_iterations))
             self._pybullet_client.setTimeStep(self._time_step)
@@ -81,7 +114,6 @@ class SparkeEnv(gym.Env):
         self._eps_step_counter = 0
         self._cummulative_reward = 0.0
         self._terminated = False
-        self._prev_reward = None
         self._set_new_goal()
         observation = self._get_obs()
         info = self._get_info()
@@ -107,7 +139,6 @@ class SparkeEnv(gym.Env):
         terminated = self._terminated
         if self._eps_step_counter >= self._max_episode_steps:
             truncated = True
-            reward = -100.0
         else:
             truncated = False
         info = self._get_info()
@@ -123,7 +154,7 @@ class SparkeEnv(gym.Env):
     def config(self, args):
         self._args = args
         
-    def _get_obs(self):
+    def _get_obs(self) -> np.ndarray:
         observation = self.robot.get_obs(
             target_base_orientation=self._goal_orientation,
             target_base_vel=self._goal_vel,
@@ -135,36 +166,49 @@ class SparkeEnv(gym.Env):
         info = {}
         return info
 
-    def _get_reward(self, observation):
-        reward = 0.0
-        # increase reward as current vel gets closer to target vel
-        
-        current_vel = observation[19:25]
-        for i in range(6):
-            diff = abs(self._goal_vel[i] - current_vel[i])
+    def _get_reward(self, observation: np.ndarray):
 
-            if round(diff, 2) <= round(self._best_vel_diffs[i],2):
-                reward += 50.0 * (self._best_vel_diffs[i] - diff)
-                self._best_vel_diffs[i] = diff
-            else:
-                reward += 50.0 * (self._best_vel_diffs[i] - diff)
-            
-            if round(diff, 2) <= 0.01:
-                reward += 100.0
+        x_vel_reward = reward_utils.calc_gaussian_reward(
+            max_reward=1.0,
+            value=observation[OBS_X_VEL],
+            target_value=observation[OBS_TARGET_X_VEL],
+            std_dev=0.05
+        )
 
-        if not ((GENERAL_Z_HEIGHT - 0.02) < observation[14] < (GENERAL_Z_HEIGHT + 0.02)):
-            reward -= 1.0
+        # yaw_vel_reward = reward_utils.calc_gaussian_reward(
+        #     max_reward=1.0,
+        #     value=observation[OBS_YAW_VEL],
+        #     target_value=0.0,
+        #     std_dev=0.2
+        # )
 
-        base_orientation = self._pybullet_client.getEulerFromQuaternion(observation[15:19])
-        yaw = base_orientation[2]
-        # if not (-YAW_DRIFT_TOLERANCE < yaw < YAW_DRIFT_TOLERANCE):
-        #     self._terminated = True
-        #     return -100.0
+        yaw_vel_reward = -abs(observation[OBS_YAW_VEL])
 
-        # punish and terminate if base Z goes below minimum
-        if observation[14] <= MIN_Z_HEIGHT:
+        base_orientation = self._pybullet_client.getEulerFromQuaternion(observation[OBS_BASE_ORIENTATION:(OBS_BASE_ORIENTATION+4)])
+        orientation_reward = -(abs(observation[OBS_BASE_ORIENTATION]) + abs(observation[OBS_BASE_ORIENTATION + 1]))
+
+        drift_reward = -abs(observation[OBS_BASE_POS + 1])
+
+        height_reward = -(abs(GENERAL_Z_HEIGHT - observation[OBS_BASE_POS + 2]))
+
+        if observation[OBS_BASE_POS + 2] <= MIN_Z_HEIGHT:
             self._terminated = True
-            return -100.0
+        elif observation[OBS_BASE_POS + 2] >= MAX_Z_HEIGHT:
+            self._terminated = True
+
+        # print(f'X Velocity Reward: {x_vel_reward * self._x_vel_weight}')
+        # print(f'Yaw Velocity Reward: {yaw_vel_reward * self._yaw_vel_weight}')
+        # print(f'Orientation Reward: {orientation_reward * self._base_orientation_weight}')
+        # print(f'Drift Reward: {drift_reward * self._drift_weight}')
+        # print(f'Height Reward: {height_reward * self._height_weight}')
+
+        reward = np.sum([
+            x_vel_reward * self._x_vel_weight,
+            yaw_vel_reward * self._yaw_vel_weight,
+            orientation_reward * self._base_orientation_weight,
+            drift_reward * self._drift_weight,
+            height_reward * self._height_weight
+        ], dtype=np.float64)
         
         return reward
 
@@ -173,10 +217,6 @@ class SparkeEnv(gym.Env):
         self._goal_vel[0] = self.np_random.uniform(0.05, 0.25)
         self._goal_z = GENERAL_Z_HEIGHT # figure out standing height
         self._goal_orientation = np.array([0, 0, 0, 1], dtype=np.float64)
-        self._best_vel_diffs = np.zeros((6,), dtype=np.float64)
-
-    def _calc_goal_distance(self, current_pos, goal_pos):
-        return np.linalg.norm(current_pos[0:2] - goal_pos[0:2])
 
     def _get_obs_high_bound(self):
         '''
